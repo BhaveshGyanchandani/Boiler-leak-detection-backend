@@ -717,6 +717,11 @@ class TrendRequest(BaseModel):
     resample_minutes:  int = Field(5, ge=1, le=60)
 
 
+
+@app.get("/", tags=["meta"])
+async def root():
+    return {"service": "Boiler Leak Detection API", "version": "1.2.0", "docs": "/docs"}
+  
 # ──────────────────────────────────────────────────────────────────────────────
 # Routes — EXISTING (unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
