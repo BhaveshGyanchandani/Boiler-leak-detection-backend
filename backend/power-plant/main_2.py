@@ -2230,6 +2230,18 @@ CSV_PATH = os.getenv("TEST_CSV_PATH", str(PROJECT_ROOT / "Data" / "boiler_testin
 # ──────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws/stream")
+# At the top of stream_test_data, after accept()
+async def _handle_incoming():
+    """Drain any messages from the client (pings etc) without blocking."""
+    try:
+        async for msg in websocket.iter_text():
+            pass  # just discard — we don't need client messages
+    except Exception:
+        pass
+
+# Don't await it — run alongside the stream
+asyncio.create_task(_handle_incoming())
+
 async def stream_test_data(websocket: WebSocket):
     await websocket.accept()
     
