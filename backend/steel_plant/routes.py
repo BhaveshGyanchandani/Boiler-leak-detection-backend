@@ -1066,13 +1066,17 @@ def _run_optimisation(
     )
     study.optimize(_objective, n_trials=n_tpe, show_progress_bar=False)
 
-    # Phase 2: CMA-ES from best TPE point
-    if study.best_trial:
-        sigma0 = np.mean([(b[1] - b[0]) * 0.10 for b in search_bounds.values()])
-        study.sampler = CmaEsSampler(
-            x0=study.best_params, sigma0=sigma0, seed=42, restart_strategy="ipop"
-        )
-        study.optimize(_objective, n_trials=n_cma, show_progress_bar=False)
+    # Phase 2: CMA-ES from best TPE point (with fallback if it crashes on small input)
+    if study.best_trial and n_cma > 0:
+        try:
+            sigma0 = np.mean([(b[1] - b[0]) * 0.10 for b in search_bounds.values()])
+            study.sampler = CmaEsSampler(
+                x0=study.best_params, sigma0=max(sigma0, 1.0), seed=42,
+                restart_strategy="ipop",
+            )
+            study.optimize(_objective, n_trials=n_cma, show_progress_bar=False)
+        except Exception as _cma_err:
+            logger.warning("CMA-ES phase failed (%s) — using TPE results only", _cma_err)
 
     completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
     feasible  = sorted(
@@ -1089,7 +1093,7 @@ def _run_optimisation(
         if near and near[0].user_attrs.get("_kpis"):
             t = near[0]; kpis = t.user_attrs["_kpis"]; sp = t.user_attrs["_sp"]
             _, viols = _check_constraints(kpis)
-            return [_format_recommendation(sp, kpis, ctx_row, False, viols)]
+            return [_format_recommendation(sp, kpis, ctx_row, False, viols, context_df=context_df)]
         return []
 
     return [
@@ -1097,6 +1101,7 @@ def _run_optimisation(
             t.user_attrs["_sp"],
             t.user_attrs["_kpis"],
             ctx_row, True, {},
+            context_df=context_df,
         )
         for t in feasible[:top_k]
     ]
@@ -1105,10 +1110,30 @@ def _run_optimisation(
 def _format_recommendation(
     sp: Dict, kpis: Dict, ctx_row: pd.Series,
     feasible: bool, violations: Dict,
+    context_df: pd.DataFrame = None,
 ) -> Dict:
-    actual_e = float(ctx_row.get(TARGET_ENERGY, 0))
+    # ── Compute "before" KPIs using the current (unmodified) setpoints ──────────
+    current_sp = {k: float(ctx_row.get(k, (BOUNDS[k][0] + BOUNDS[k][1]) / 2))
+                  for k in CONTROLLABLE}
+    kpi_before_raw = {}
+    if context_df is not None and len(context_df) >= 2:
+        try:
+            kpi_before_raw = _predict_kpis_for_setpoints(current_sp, context_df)
+        except Exception:
+            pass
+
+    kpi_before = {
+        tgt: round(kpi_before_raw[tgt]["point"], 3) if tgt in kpi_before_raw else None
+        for tgt in TARGET_COLS
+    }
+    kpi_after = {
+        tgt: round(kpis[tgt]["point"], 3) if tgt in kpis else None
+        for tgt in TARGET_COLS
+    }
+
     opt_e    = kpis.get(TARGET_ENERGY, {}).get("point", 0)
-    saving   = actual_e - opt_e
+    before_e = kpi_before.get(TARGET_ENERGY) or float(ctx_row.get(TARGET_ENERGY, opt_e))
+    saving   = before_e - opt_e
 
     setpoint_changes = []
     for var in CONTROLLABLE:
@@ -1130,6 +1155,8 @@ def _format_recommendation(
     return {
         "feasible"              : feasible,
         "violations"            : violations,
+        "kpi_before"            : kpi_before,
+        "kpi_after"             : kpi_after,
         "kpi_predictions"       : {
             tgt: {
                 "point"      : kpis[tgt]["point"],
@@ -1140,7 +1167,7 @@ def _format_recommendation(
             for tgt in TARGET_COLS if tgt in kpis
         },
         "energy_saving_kWh_t"   : round(saving, 3),
-        "energy_saving_pct"     : round(saving / (actual_e + 1e-9) * 100, 2),
+        "energy_saving_pct"     : round(saving / (before_e + 1e-9) * 100, 2),
         "setpoint_changes"      : setpoint_changes,
         "top_3_actions"         : [
             s["setpoint"] for s in sorted(
