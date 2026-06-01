@@ -2222,28 +2222,6 @@ CSV_PATH = os.getenv("TEST_CSV_PATH", str(PROJECT_ROOT / "Data" / "boiler_testin
 # ──────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws/stream")
-async def stream_test_data(websocket: WebSocket):
-
-    await websocket.accept()
-
-    async def _handle_incoming():
-        """Drain any messages from the client (pings etc) without blocking."""
-        try:
-            async for msg in websocket.iter_text():
-                pass
-        except Exception:
-            pass
-
-    asyncio.create_task(_handle_incoming())
-
-    if not Path(CSV_PATH).exists():
-        await websocket.send_json(
-            {"error": f"CSV file not found at {CSV_PATH}"}
-        )
-        await websocket.close()
-        return
-
-    # rest of your existing code... 
 
 async def stream_test_data(websocket: WebSocket):
     await websocket.accept()
