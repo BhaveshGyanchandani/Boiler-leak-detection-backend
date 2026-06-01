@@ -2114,7 +2114,7 @@ async def compute_full_analysis(
         last_n = min(10, len(df_raw))
         last_rows = df_raw.iloc[-last_n:]
         current_vals = {s: float(last_rows[s].mean()) for s in SENSOR_COLS}
-        
+          
         # Compute sensitivities using XGBoost only (no full inference)
         sensitivities = {}
         feature_cols = models["feature_cols"]
@@ -2286,4 +2286,4 @@ async def stream_test_data(websocket: WebSocket):
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8001))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("main_2:app", host="0.0.0.0", port=port, reload=False)
