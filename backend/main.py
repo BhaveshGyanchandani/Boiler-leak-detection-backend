@@ -3,8 +3,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 
-from power_plant.routes import router as power_router, load_all_models as load_power_models
-from steel_plant.routes import router as steel_router, load_all_models as load_steel_models
+from backend.power_plant.routes import router as power_router, load_all_models as load_power_models
+from backend.steel_plant.routes import router as steel_router, load_all_models as load_steel_models
 
 logger = logging.getLogger("main")
 
