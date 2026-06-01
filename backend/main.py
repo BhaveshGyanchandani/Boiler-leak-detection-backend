@@ -18,7 +18,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 @app.get("/ping", tags=["meta"])
 def ping():
     return {"status": "ok", "message": "pong"}
