@@ -27,15 +27,15 @@ POST /trends                      → Rolling trend + correlation analysis
 """
 
 from __future__ import annotations
-
+from fastapi import APIRouter
 import asyncio
+import csv
 import io
 import json
 import logging
 import os
 import re
 import time
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,17 +43,15 @@ import httpx
 import joblib
 import numpy as np
 import pandas as pd
-import uvicorn
 import xgboost as xgb
-from fastapi import FastAPI, File, HTTPException, UploadFile, status , WebSocket, Query
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import File, HTTPException, UploadFile, status, WebSocket, Query
 from pydantic import BaseModel, Field, validator
 from tensorflow import keras
+from fastapi.middleware.cors import CORSMiddleware
 
-import csv
-from pathlib import Path
+router = APIRouter()
 # ──────────────────────────────────────────────────────────────────────────────
-# Logging
+# Loggingapp.
 # ──────────────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -61,6 +59,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger("boiler_api")
 
+
+
+app = FastAPI(
+    title="iFactory AI Backend",
+    description="Power Plant + Steel Plant AI inference APIs",
+    version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # ──────────────────────────────────────────────────────────────────────────────
 # Constants — must match the notebook exactly
 # ──────────────────────────────────────────────────────────────────────────────
@@ -436,7 +449,7 @@ def run_inference(
             f"got {M.shape[1]}. Check the M column_stack in run_inference."
         )
     risk  = models["meta_learner"].predict_proba(M)[:, 1]
-    alarm = risk >= _threshold
+    alarm = (risk >= _threshold).astype(bool)  # convert numpy.bool_ → Python bool array
 
     result = pd.DataFrame({
         "risk_score":       risk,
@@ -458,13 +471,13 @@ def run_inference(
 
 
 def _summary_stats(result: pd.DataFrame) -> Dict[str, Any]:
-    total  = len(result)
-    alarms = int(result["alarm"].sum())
+    total  = int(len(result))
+    alarms = int(result["alarm"].astype(bool).sum())
     return {
         "total_windows":  total,
         "alarm_count":    alarms,
         "normal_count":   total - alarms,
-        "alarm_rate_pct": round(alarms / total * 100, 2) if total else 0.0,
+        "alarm_rate_pct": round(float(alarms) / total * 100, 2) if total else 0.0,
         "risk_score": {
             "mean": round(float(result["risk_score"].mean()), 4),
             "max":  round(float(result["risk_score"].max()),  4),
@@ -477,7 +490,7 @@ def _summary_stats(result: pd.DataFrame) -> Dict[str, Any]:
             "xgboost":          round(float(result["xgboost"].mean()),          4),
             "lstm":             round(float(result["lstm"].mean()),             4),
         },
-        "threshold_used": _threshold,
+        "threshold_used": float(_threshold),
     }
 
 
@@ -490,15 +503,19 @@ def _result_to_records(
     Convert inference result DataFrame to a list of record dicts.
     If df_raw is supplied, raw sensor values are embedded into each record
     (aligned via the SEQ_LEN offset) so the frontend can display them.
+    All numpy scalar types are explicitly cast to Python native types to
+    prevent FastAPI's jsonable_encoder from failing on numpy.bool_ etc.
     """
     has_ts = "timestamp" in result.columns
+    # Convert alarm column to Python bool to avoid numpy.bool_ serialization errors
+    alarm_bools = result["alarm"].astype(bool).tolist()
     records = result.to_dict("records")
     out = []
     for i, r in enumerate(records):
         rec: Dict[str, Any] = {
             "timestamp":        str(r["timestamp"]) if has_ts else None,
             "risk_score":       round(float(r["risk_score"]),       4),
-            "alarm":            bool(r["alarm"]),
+            "alarm":            bool(alarm_bools[i]),
             "autoencoder":      round(float(r["autoencoder"]),      4),
             "isolation_forest": round(float(r["isolation_forest"]), 4),
             "random_forest":    round(float(r["random_forest"]),    4),
@@ -592,36 +609,11 @@ def _sensor_status(sensor: str, value: float) -> Dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# App lifespan
+# /ping — lightweight health check (no model required)
 # ──────────────────────────────────────────────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("🚀 Starting up — loading models …")
-    await load_all_models()
-    logger.info("✅ Models ready.")
-    yield
-    logger.info("🛑 Shutting down.")
-
-
-app = FastAPI(
-    title="Boiler Tube Early Leak Detection API",
-    description=(
-        "Stacking-ensemble inference "
-        "(Autoencoder + IsolationForest + LSTM + RandomForest + XGBoost → Meta-Learner) "
-        "for predicting boiler tube failures. "
-        "Model repo: ZOROD/Boiler_Tube_Early_leak_detection on HuggingFace."
-    ),
-    version="1.2.0",
-    lifespan=lifespan,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+@app.get("/ping", tags=["meta"])
+async def ping():
+    return {"status": "ok", "service": "power_plant", "models_loaded": _models_ready()}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Pydantic schemas — existing (unchanged)
@@ -2230,17 +2222,28 @@ CSV_PATH = os.getenv("TEST_CSV_PATH", str(PROJECT_ROOT / "Data" / "boiler_testin
 # ──────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws/stream")
-# At the top of stream_test_data, after accept()
-async def _handle_incoming():
-    """Drain any messages from the client (pings etc) without blocking."""
-    try:
-        async for msg in websocket.iter_text():
-            pass  # just discard — we don't need client messages
-    except Exception:
-        pass
+async def stream_test_data(websocket: WebSocket):
 
-# Don't await it — run alongside the stream
-asyncio.create_task(_handle_incoming())
+    await websocket.accept()
+
+    async def _handle_incoming():
+        """Drain any messages from the client (pings etc) without blocking."""
+        try:
+            async for msg in websocket.iter_text():
+                pass
+        except Exception:
+            pass
+
+    asyncio.create_task(_handle_incoming())
+
+    if not Path(CSV_PATH).exists():
+        await websocket.send_json(
+            {"error": f"CSV file not found at {CSV_PATH}"}
+        )
+        await websocket.close()
+        return
+
+    # rest of your existing code... 
 
 async def stream_test_data(websocket: WebSocket):
     await websocket.accept()
@@ -2305,4 +2308,4 @@ async def stream_test_data(websocket: WebSocket):
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8001))
-    uvicorn.run("main_2:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
