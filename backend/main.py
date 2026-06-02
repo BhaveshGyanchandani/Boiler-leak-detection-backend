@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
@@ -8,25 +9,37 @@ from backend.steel_plant.routes import router as steel_router, load_all_models a
 
 logger = logging.getLogger("main")
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup: Load models
-    logger.info("🚀 Loading Power Plant models …")
+
+async def _load_models_background():
+    """
+    Load both sets of models after the server is already up and accepting
+    requests. This way Render sees an open port immediately and does not
+    time-out waiting for HuggingFace downloads to finish.
+    """
+    logger.info("🚀 Background: Loading Power Plant models …")
     try:
         await load_power_models()
         logger.info("✅ Power Plant models ready.")
     except Exception as e:
         logger.error("❌ Power Plant model loading failed: %s", e)
 
-    logger.info("🚀 Loading Steel Plant models …")
+    logger.info("🚀 Background: Loading Steel Plant models …")
     try:
         await load_steel_models()
         logger.info("✅ Steel Plant models ready.")
     except Exception as e:
         logger.error("❌ Steel Plant model loading failed: %s", e)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Fire model loading as a background task so the server binds its port
+    # BEFORE the HuggingFace downloads start. Render's port scanner will see
+    # the open port within a second and consider the deploy successful.
+    asyncio.create_task(_load_models_background())
     yield
-    # Shutdown: (if needed)
+    # Shutdown: nothing extra needed
+
 
 app = FastAPI(
     title="iFactory AI Backend",
@@ -43,9 +56,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/ping", tags=["meta"])
 def ping():
     return {"status": "ok", "message": "pong"}
+
 
 @app.get("/", tags=["meta"])
 def root():
@@ -54,6 +69,7 @@ def root():
         "version": "1.0.0",
         "routes": ["/power", "/steel", "/ping", "/docs"],
     }
+
 
 app.include_router(power_router, prefix="/power")
 app.include_router(steel_router, prefix="/steel")
